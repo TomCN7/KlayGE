@@ -1,51 +1,32 @@
-// Font.cpp
-// KlayGE Font类 实现文件
-// Ver 3.10.0
-// 版权所有(C) 龚敏敏, 2003-2010
-// Homepage: http://www.klayge.org
-//
-// 3.10.0
-// RenderText速度增加50% (2010.3.9)
-//
-// 3.9.0
-// 增加了KFontLoader (2009.10.16)
-// kfont升级到2.0格式，支持LZMA压缩 (2009.12.13)
-//
-// 3.7.0
-// 新的基于distance的字体格式 (2008.2.13)
-//
-// 3.6.0
-// 增加了Rect对齐的方式 (2007.6.5)
-//
-// 3.4.0
-// 优化了顶点缓冲区 (2006.9.20)
-//
-// 3.3.0
-// 支持渲染到3D位置 (2006.5.20)
-//
-// 2.8.0
-// 修正了越界的bug (2005.7.20)
-// 增加了pool (2005.8.10)
-//
-// 2.7.1
-// 美化了字体显示效果 (2005.7.7)
-//
-// 2.3.0
-// 使用FreeType实现字体读取 (2004.12.26)
-//
-// 2.0.4
-// 纹理格式改为PF_AL4 (2004.3.18)
-//
-// 2.0.3
-// 修正了RenderText的Bug (2004.2.18)
-// 改用VertexShader完成2D变换 (2004.3.1)
-//
-// 2.0.0
-// 初次建立 (2003.8.18)
-// 使用LRU算法 (2003.9.26)
-//
-// 修改记录
-/////////////////////////////////////////////////////////////////////////////////
+/**
+ * @file Font.cpp
+ * @author Minmin Gong
+ *
+ * @section DESCRIPTION
+ *
+ * This source file is part of KlayGE
+ * For the latest info, see http://www.klayge.org
+ *
+ * @section LICENSE
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published
+ * by the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ *
+ * You may alternatively use this source under the terms of
+ * the KlayGE Proprietary License (KPL). You can obtained such a license
+ * from http://www.klayge.org/licensing/.
+ */
 
 #include <KlayGE/KlayGE.hpp>
 #include <KFL/ThrowErr.hpp>
@@ -64,6 +45,7 @@
 #include <KlayGE/ResLoader.hpp>
 #include <KlayGE/SceneObjectHelper.hpp>
 #include <KlayGE/LZMACodec.hpp>
+#include <KlayGE/TransientBuffer.hpp>
 
 #include <algorithm>
 #include <vector>
@@ -120,12 +102,24 @@ namespace KlayGE
 			half_width_height_ep_ = effect_->ParameterByName("half_width_height");
 			mvp_ep_ = effect_->ParameterByName("mvp");
 
-			vb_ = rf.MakeVertexBuffer(BU_Dynamic, EAH_CPU_Write | EAH_GPU_Read, nullptr);
+			if (caps.no_overwrite_support)
+			{
+				uint32_t const index_per_char = restart_ ? 5 : 6;
+				uint32_t const INIT_NUM_CHAR = 1024;
+				tb_vb_ = MakeSharedPtr<TransientBuffer>(static_cast<uint32_t>(INIT_NUM_CHAR * 4 * sizeof(FontVert)), TransientBuffer::BF_Vertex);
+				tb_ib_ = MakeSharedPtr<TransientBuffer>(static_cast<uint32_t>(INIT_NUM_CHAR * index_per_char * sizeof(uint16_t)), TransientBuffer::BF_Index);
+				vb_ = tb_vb_->GetBuffer();
+				ib_ = tb_ib_->GetBuffer();
+			}
+			else
+			{
+				vb_ = rf.MakeVertexBuffer(BU_Dynamic, EAH_CPU_Write | EAH_GPU_Read, nullptr);
+				ib_ = rf.MakeIndexBuffer(BU_Dynamic, EAH_CPU_Write | EAH_GPU_Read, nullptr);
+			}
+
 			rl_->BindVertexStream(vb_, make_tuple(vertex_element(VEU_Position, 0, EF_BGR32F),
 											vertex_element(VEU_Diffuse, 0, EF_ABGR8),
 											vertex_element(VEU_TextureCoord, 0, EF_GR32F)));
-
-			ib_ = rf.MakeIndexBuffer(BU_Dynamic, EAH_CPU_Write | EAH_GPU_Read, nullptr);
 			rl_->BindIndexStream(ib_, EF_R16UI);
 
 			pos_aabb_ = AABBox(float3(0, 0, 0), float3(0, 0, 0));
@@ -150,16 +144,38 @@ namespace KlayGE
 			{
 				if (!vertices_.empty() && !indices_.empty())
 				{
-					vb_->Resize(static_cast<uint32_t>(vertices_.size() * sizeof(vertices_[0])));
+					if (tb_vb_)
 					{
-						GraphicsBuffer::Mapper mapper(*vb_, BA_Write_Only);
-						std::copy(vertices_.begin(), vertices_.end(), mapper.Pointer<FontVert>());
-					}
+						tb_vb_->KnowtifyUnused(tb_vb_sub_alloc_);
+						tb_vb_sub_alloc_ = tb_vb_->Alloc(static_cast<uint32_t>(vertices_.size() * sizeof(vertices_[0])), &vertices_[0]);
+						tb_vb_->UploadData();
 
-					ib_->Resize(static_cast<uint32_t>(indices_.size() * sizeof(indices_[0])));
+						tb_ib_->KnowtifyUnused(tb_ib_sub_alloc_);
+						tb_ib_sub_alloc_ = tb_ib_->Alloc(static_cast<uint32_t>(indices_.size() * sizeof(indices_[0])), &indices_[0]);
+						tb_ib_->UploadData();
+
+						vb_ = tb_vb_->GetBuffer();
+						ib_ = tb_ib_->GetBuffer();
+						rl_->SetVertexStream(0, vb_);
+						rl_->BindIndexStream(ib_, EF_R16UI);
+						rl_->StartVertexLocation(tb_vb_sub_alloc_.offset_ / sizeof(vertices_[0]));
+						rl_->NumVertices(static_cast<uint32_t>(vertices_.size()));
+						rl_->StartIndexLocation(tb_ib_sub_alloc_.offset_ / sizeof(indices_[0]));
+						rl_->NumIndices(static_cast<uint32_t>(indices_.size()));
+					}
+					else
 					{
-						GraphicsBuffer::Mapper mapper(*ib_, BA_Write_Only);
-						std::copy(indices_.begin(), indices_.end(), mapper.Pointer<uint16_t>());
+						vb_->Resize(static_cast<uint32_t>(vertices_.size() * sizeof(vertices_[0])));
+						{
+							GraphicsBuffer::Mapper mapper(*vb_, BA_Write_Only);
+							std::copy(vertices_.begin(), vertices_.end(), mapper.Pointer<FontVert>());
+						}
+
+						ib_->Resize(static_cast<uint32_t>(indices_.size() * sizeof(indices_[0])));
+						{
+							GraphicsBuffer::Mapper mapper(*ib_, BA_Write_Only);
+							std::copy(indices_.begin(), indices_.end(), mapper.Pointer<uint16_t>());
+						}
 					}
 				}
 
@@ -194,6 +210,12 @@ namespace KlayGE
 			this->OnRenderBegin();
 			re.Render(*this->GetRenderTechnique(), *rl_);
 			this->OnRenderEnd();
+
+			if (tb_vb_)
+			{
+				tb_vb_->OnPresent();
+				tb_ib_->OnPresent();
+			}
 		}
 
 		Size_T<float> CalcSize(std::wstring const & text, float font_size)
@@ -338,15 +360,7 @@ namespace KlayGE
 				}
 			}
 
-			int index_per_char;
-			if (restart_)
-			{
-				index_per_char = 5;
-			}
-			else
-			{
-				index_per_char = 6;
-			}
+			uint32_t const index_per_char = restart_ ? 5 : 6;
 
 			dirty_ = true;
 
@@ -440,15 +454,7 @@ namespace KlayGE
 			float x = sx, y = sy;
 			float maxx = sx, maxy = sy;
 
-			int index_per_char;
-			if (restart_)
-			{
-				index_per_char = 5;
-			}
-			else
-			{
-				index_per_char = 6;
-			}
+			uint32_t const index_per_char = restart_ ? 5 : 6;
 
 			dirty_ = true;
 
@@ -717,6 +723,10 @@ namespace KlayGE
 
 		GraphicsBufferPtr vb_;
 		GraphicsBufferPtr ib_;
+		TransientBufferPtr tb_vb_;
+		TransientBufferPtr tb_ib_;
+		SubAlloc tb_vb_sub_alloc_;
+		SubAlloc tb_ib_sub_alloc_;
 
 		TexturePtr		dist_texture_;
 		TexturePtr		a_char_texture_;

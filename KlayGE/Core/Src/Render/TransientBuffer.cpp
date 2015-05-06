@@ -243,13 +243,12 @@ namespace KlayGE
 	{
 		{
 			GraphicsBuffer::Mapper mapper(*buffer_, BA_Write_No_Overwrite);
-			char* buffer_data = mapper.Pointer<char>();
+			uint8_t* buffer_data = mapper.Pointer<uint8_t>();
 
 			std::vector<SubAlloc>::iterator iter = data_list_.begin();
 			for (; iter != data_list_.end(); ++ iter)
 			{
-				char* p = buffer_data + iter->offset_;
-				memcpy(p, iter->data_, iter->length_);
+				memcpy(buffer_data + iter->offset_, iter->data_, iter->length_);
 			}
 		}
 
